@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <!-- ADR-017: an independent service; the shared build comes by version from GitHub Packages. -->
+  <parent>
+    <groupId>com.growercare</groupId>
+    <artifactId>gc-parent</artifactId>
+    <version>1.0.0</version>
+    <relativePath/>
+  </parent>
+
+  <artifactId>edge-gateway</artifactId>
+  <version>${revision}</version>
+  <name>edge-gateway</name>
+  <description>Single entry point for the GrowerCare web apps: routing, token checks, header hygiene, rate limits, CORS</description>
+
+  <properties>
+    <revision>1.0.0-SNAPSHOT</revision>
+    <!-- SPEC-EDGE-01 D1: the spike of 2026-11-18 proved this line on Boot 4.1.2. -->
+    <spring-cloud.version>2025.1.4</spring-cloud.version>
+  </properties>
+
+  <repositories>
+    <repository>
+      <id>github</id>
+      <name>GitHub Packages (growercare-platform-libs)</name>
+      <url>https://maven.pkg.github.com/manjunathyadavs1998/growercare-platform-libs</url>
+      <releases><enabled>true</enabled></releases>
+      <snapshots><enabled>false</enabled></snapshots>
+    </repository>
+  </repositories>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-dependencies</artifactId>
+        <version>${spring-cloud.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <dependency><groupId>org.springframework.cloud</groupId><artifactId>spring-cloud-starter-gateway-server-webmvc</artifactId></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-data-redis</artifactId></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-jackson</artifactId></dependency>
+    <dependency>
+      <groupId>com.growercare</groupId><artifactId>gc-test-support</artifactId><scope>test</scope>
+      <exclusions>
+        <!-- the edge has no database: keep JDBC (and its DataSource auto-configuration) off the test classpath -->
+        <exclusion><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-jdbc</artifactId></exclusion>
+        <exclusion><groupId>org.flywaydb</groupId><artifactId>flyway-database-postgresql</artifactId></exclusion>
+        <exclusion><groupId>org.postgresql</groupId><artifactId>postgresql</artifactId></exclusion>
+      </exclusions>
+    </dependency>
+    <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-webmvc-test</artifactId><scope>test</scope></dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+      </plugin>
+      <!-- Image: mvn package jib:dockerBuild (local) · CI: jib:build to GHCR (SPEC-PLAT-06 R79) -->
+      <plugin>
+        <groupId>com.google.cloud.tools</groupId>
+        <artifactId>jib-maven-plugin</artifactId>
+        <configuration>
+          <container>
+            <ports><port>8080</port></ports>
+          </container>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
