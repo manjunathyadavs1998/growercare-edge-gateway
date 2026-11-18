@@ -1,6 +1,6 @@
 # SPEC-EDGE-01: Edge gateway
 - **Requirements:** IAM-5 (OTP limits per IP), PRV-5, OWASP API4 (resource consumption), Phase 1 PRD UI scope (one origin for the apps) and M3 ("J5/J6/J8/J9 pass via API through the gateway"); architecture `docs/architecture/01_SERVICES/edge-gateway.md`
-- **Status:** Agreed
+- **Status:** Implemented
 - **Owner:** edge-gateway (new repository `growercare-edge-gateway`, port 8080)
 
 ## 0. Decisions (to agree with this spec)
@@ -12,14 +12,14 @@
 | D4 | **Request hygiene:** client headers that could steer routing or identity are removed (`X-Country`, `X-Shard`, `X-User-*`, `X-Forwarded-User`, `X-Internal-*`); every request gets an `X-Request-Id` (kept when the client sent a UUID) and the W3C `traceparent` is passed on; bodies over 1 MB are 413 (uploads go straight to object storage with presigned URLs) | ID-11/never trust client country or shard; uploads never pass the edge |
 | D5 | **Rate limits (Redis token buckets):** per user (token subject) 20 requests/s, burst 40; per client IP for requests without a user 10/s; **starting a phone verification** (`POST /api/grower/growers/*/verifications`) 5 per 15 minutes per user and 20 per hour per IP. 429 Problem Details with `Retry-After` | IAM-5 at the network edge (grower-service keeps its per-grower limit, SPEC-GRW-03 D4) |
 | D6 | **Redis down:** the OTP limit **fails closed** (503); general limits **fail open** | Fraud risk on OTP outweighs availability there; elsewhere availability wins |
-| D7 | **CORS** for the web apps' origins (`GC_CORS_ALLOWED_ORIGINS`), methods and headers the APIs use; services keep their own CORS for direct local use | The browser talks to one origin |
+| D7 | **CORS** for the web apps' origins (`GC_CORS_ALLOWED_ORIGINS`), methods and headers the APIs use; no credentials (tokens travel in headers). The `Origin` header is **not forwarded**, so services (which keep their own CORS for direct local use) never add a second `Access-Control-Allow-Origin` | The browser talks to one origin; duplicate CORS headers make browsers reject the response |
 
 ## 1. Behaviour (rules)
 | Rule | Given | When | Then |
 |---|---|---|---|
 | EDGE-R1 | a valid user token | `GET /api/cases/cases?limit=1` | forwarded to case-service as `GET /cases?limit=1` with the same `Authorization`; the response passed back unchanged (status, body, `ETag`, `Location`) |
 | EDGE-R2 | each prefix of D2 | a request | reaches its service with the prefix stripped |
-| EDGE-R3 | any route | `…/internal/…` or `…/dev/…` path · an unknown prefix | 404 Problem Details; nothing forwarded |
+| EDGE-R3 | any route | `…/internal/…` or `…/dev/…` segment (any case) · an unknown prefix · a path outside `/api/**` and health · an encoded (`%`), dot (`.`, `..`) or `;` segment | 404 Problem Details; nothing forwarded (checked before the token, so a probe learns nothing more with one) |
 | EDGE-R4 | no token · expired · bad signature · wrong audience (a service token) | any `/api/**` route | 401 Problem Details; nothing forwarded |
 | EDGE-R5 | `/actuator/health` | no token | 200 |
 | EDGE-R6 | headers of D4 sent by the client | forwarded | removed; `X-Request-Id` present (the client's if it is a UUID, else a new one); `traceparent` passed |
@@ -35,7 +35,7 @@
 |---|---|---|---|
 | EDGE-E1 | R1 | care.in token, `GET /api/cases/cases?limit=1` | 200 the same body as case-service directly |
 | EDGE-E2 | R2 | `/api/iam/me`, `/api/grower/growers/me`, `/api/catalog/products?country=IN` | each service's answer |
-| EDGE-E3 | R3 | `/api/grower/internal/growers/1` · `/api/notify/dev/mailbox` · `/api/unknown/x` | 404 ×3, downstream never called |
+| EDGE-E3 | R3 | `/api/grower/internal/growers/1` · `/api/notify/dev/mailbox` · `/api/unknown/x` · `/api/iam/Internal/…` · `/api/iam/%2e%2e/internal/…` · `/cases` | 404 each, downstream never called |
 | EDGE-E4 | R4 | none · expired · forged · case-service client token | 401 ×4 |
 | EDGE-E5 | R5 | `/actuator/health` | 200 |
 | EDGE-E6 | R6 | `X-Country: BR`, `X-Shard: 7`, `X-Request-Id: <uuid>` | downstream sees no X-Country/X-Shard, the same request id |
@@ -44,11 +44,11 @@
 | EDGE-E9 | R9 | 6 verification starts by one user | 6th is 429 |
 | EDGE-E10 | R10 | Redis stopped: an OTP start · `GET /api/iam/me` | 503 · 200 |
 | EDGE-E11 | R11 | catalog-registry stopped | 503 on `/api/catalog/**`, other routes fine |
-| EDGE-E12 | R12 | preflight from `http://localhost:5173` · from `http://evil.test` | allowed · refused |
+| EDGE-E12 | R12 | preflight from `http://localhost:5173` · from `http://evil.test` · a request with `Origin` | allowed · 403 · the service never sees `Origin`; only the gateway's CORS header comes back |
 | EDGE-E13 | **smoke** | the J5, J6, J8, J9 steps of `smoke.sh` with `VIA=gateway` (all calls to `http://localhost:8080/api/…`) | same results as direct |
 
 ## 3. API contract
-Routes only (D2); each service owns its contract. The gateway's own errors are Problem Details with `code` (`UNAUTHENTICATED`, `NOT_FOUND`, `PAYLOAD_TOO_LARGE`, `RATE_LIMITED`, `DEPENDENCY_UNAVAILABLE`).
+Routes only (D2); each service owns its contract. The gateway's own errors are Problem Details with `code` (`UNAUTHENTICATED`, `NOT_FOUND`, `PAYLOAD_TOO_LARGE`, `RATE_LIMITED`, `DEPENDENCY_UNAVAILABLE` (503), `DEPENDENCY_TIMEOUT` (504)).
 
 ## 4. Data & events
 None persisted. Redis keys `rl:{user|ip|otp-user|otp-ip}:{id}` with the bucket's TTL. Configuration (env only): service base URLs, OIDC issuer and JWKS, Redis, CORS origins, limits (defaults as D5).
@@ -64,6 +64,8 @@ None persisted. Redis keys `rl:{user|ip|otp-user|otp-ip}:{id}` with the bucket's
 ## 6. Traceability
 | Rule / Example | Test |
 |---|---|
-| R1–R7, R11, R12 / E1–E7, E11, E12 | `GatewayRoutingIT` (WireMock downstreams) |
-| R8–R10 / E8–E10 | `RateLimitIT` (Redis container; stopped for E10) |
+| R1–R7, R12 / E1–E7, E12 | `GatewayRoutingIT` (JDK HTTP stub services), `RouteGuardFilterTest` (R3 path rule), `EdgeConfigTest` (D3 validators, start-up check, origins) |
+| R11 / E11 | `UpstreamFailureIT` (a closed port; a 5 s stub) |
+| R8, R9 / E8, E9 | `RateLimitIT` (Redis Testcontainer) |
+| R10 / E10 | `RedisDownIT` (Redis address with nothing listening) |
 | E13 | growercare-local-platform `smoke.sh` |

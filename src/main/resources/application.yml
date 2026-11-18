@@ -1,0 +1,80 @@
+# edge-gateway (SPEC-EDGE-01). Configuration comes ONLY from environment variables (SPEC-PLAT-06); see .env.example.
+# Environment-specific values have no defaults: the gateway refuses to start and names every missing variable.
+server:
+  port: ${SERVER_PORT:8080}
+  error:
+    include-stacktrace: never
+    include-message: never
+  # behind the ALB / local proxy: the client address comes from X-Forwarded-For set by a trusted proxy only
+  forward-headers-strategy: ${GC_FORWARD_HEADERS_STRATEGY:none}
+
+spring:
+  application:
+    name: edge-gateway
+  threads:
+    virtual:
+      enabled: true
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${OIDC_ISSUER_URI}
+          jwk-set-uri: ${OIDC_JWKS_URI}
+  data:
+    redis:
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
+      timeout: 500ms
+      connect-timeout: 500ms
+  # D11: upstream connect 2 s, read 3 s (then 504). Spring Cloud Gateway 5 uses Boot's HTTP client settings.
+  http:
+    clients:
+      connect-timeout: 2s
+      read-timeout: 3s
+  cloud:
+    gateway:
+      server:
+        webmvc:
+          # D2: one prefix per service, stripped. Origin is not forwarded: the gateway answers CORS (D7), so services
+          # never add a second Access-Control-Allow-Origin.
+          routes:
+            - id: iam
+              uri: ${IAM_BASE_URL}
+              predicates: [ "Path=/api/iam/**" ]
+              filters: [ "StripPrefix=2", "RemoveRequestHeader=Origin" ]
+            - id: cases
+              uri: ${CASE_BASE_URL}
+              predicates: [ "Path=/api/cases/**,/api/case/**" ]
+              filters: [ "StripPrefix=2", "RemoveRequestHeader=Origin" ]
+            - id: grower
+              uri: ${GROWER_BASE_URL}
+              predicates: [ "Path=/api/grower/**" ]
+              filters: [ "StripPrefix=2", "RemoveRequestHeader=Origin" ]
+            - id: catalog
+              uri: ${CATALOG_BASE_URL}
+              predicates: [ "Path=/api/catalog/**" ]
+              filters: [ "StripPrefix=2", "RemoveRequestHeader=Origin" ]
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+gc:
+  edge:
+    # D7: comma-separated web-app origins; empty = no browser origin allowed
+    cors-allowed-origins: ${GC_CORS_ALLOWED_ORIGINS:}
+    # D4: larger bodies are 413 (uploads go straight to object storage)
+    max-body-bytes: 1048576
+    # D5: token buckets (capacity, refill per period)
+    limits:
+      user:      { capacity: 40, refill: 20, period: 1s }
+      ip:        { capacity: 10, refill: 10, period: 1s }
+      otp-user:  { capacity: 5,  refill: 5,  period: 15m }
+      otp-ip:    { capacity: 20, refill: 20, period: 1h }
